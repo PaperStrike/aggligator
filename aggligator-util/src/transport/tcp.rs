@@ -265,7 +265,7 @@ impl ConnectingTransport for TcpConnector {
 
         match existing.iter().find(|link| {
             let Some(tag) = link.tag().as_any().downcast_ref::<TcpLinkTag>() else { return false };
-            tag.interface == new_tag.interface && link.remote_user_data() == new.remote_user_data()
+            tag.interface == new_tag.interface && tag.remote.ip() == new_tag.remote.ip()
         }) {
             Some(other) => {
                 let other_tag = other.tag().as_any().downcast_ref::<TcpLinkTag>().unwrap();
