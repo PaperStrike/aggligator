@@ -3,11 +3,11 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{style::Stylize, tty::IsTty};
-use futures::future;
+use futures::{future, FutureExt};
 use std::{
     collections::{HashMap, HashSet},
     io::stdout,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     process::exit,
     sync::Arc,
@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpSocket, TcpStream},
     select,
     sync::{broadcast, mpsc, oneshot, watch},
     task::block_in_place,
@@ -156,7 +156,10 @@ impl ClientCli {
         let no_monitor = self.no_monitor || !stdout().is_tty();
         let once = self.once;
 
-        let listen_addr = IpAddr::from(if self.global { Ipv6Addr::UNSPECIFIED } else { Ipv6Addr::LOCALHOST });
+        let (listen_addr_ipv4, listen_addr_ipv6) = match self.global {
+            true => (IpAddr::from(Ipv4Addr::UNSPECIFIED), IpAddr::from(Ipv6Addr::UNSPECIFIED)),
+            false => (IpAddr::from(Ipv4Addr::LOCALHOST), IpAddr::from(Ipv6Addr::LOCALHOST)),
+        };
 
         let ports: Vec<_> =
             self.port.clone().into_iter().map(|(s, c)| if s == 0 { (c, c) } else { (s, c) }).collect();
@@ -249,9 +252,22 @@ impl ClientCli {
 
         let mut port_tasks = Vec::new();
         for (server_port, client_port) in ports {
-            let listener = TcpListener::bind(SocketAddr::new(listen_addr, client_port))
-                .await
-                .context(format!("cannot bind to local port {client_port}"))?;
+            let mut listeners = Vec::new();
+            if self.ipv4 || !self.ipv6 {
+                let socket = TcpSocket::new_v4()?;
+                socket.bind(SocketAddr::new(listen_addr_ipv4, client_port))?;
+                let listener = socket.listen(1024)
+                    .context(format!("cannot bind to local ipv4 port {client_port}"))?;
+                listeners.push(listener);
+            }
+            if self.ipv6 || !self.ipv4 {
+                let socket = TcpSocket::new_v6()?;
+                socket2::SockRef::from(&socket).set_only_v6(true)?;
+                socket.bind(SocketAddr::new(listen_addr_ipv6, client_port))?;
+                let listener = socket.listen(1024)
+                    .context(format!("cannot bind to local ipv6 port {client_port}"))?;
+                listeners.push(listener);
+            }
 
             let control_tx = control_tx.clone();
             let tag_err_tx = tag_err_tx.clone();
@@ -265,7 +281,9 @@ impl ClientCli {
             let dump = dump.clone();
             port_tasks.push(async move {
                 loop {
-                    let (socket, src) = listener.accept().await?;
+                    let (res, _, _) =
+                        future::select_all(listeners.iter().map(|listener| listener.accept().boxed())).await;
+                    let (socket, src) = res?;
 
                     let mut builder = ConnectorBuilder::new(port_cfg.clone());
                     if let Some(dump) = dump.clone() {
@@ -430,8 +448,12 @@ impl ServerCli {
         let mut server_ports = Vec::new();
 
         if let Some(port) = self.tcp {
-            match TcpAcceptor::new([SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)]).await {
-                Ok(tcp) => {
+            let socket = TcpSocket::new_v6()?;
+            socket2::SockRef::from(&socket).set_only_v6(false)?;
+            socket.bind(SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port))?;
+            match socket.listen(1024) {
+                Ok(listener) => {
+                    let tcp = TcpAcceptor::from_listeners([listener])?;
                     server_ports.push(format!("TCP {tcp}"));
                     acceptor.add(tcp);
                 }

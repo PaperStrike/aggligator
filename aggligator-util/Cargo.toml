@@ -53,6 +53,7 @@ tracing = "0.1"
 network-interface = "1"
 async-trait = "0.1"
 bytes = "1"
+socket2 = "0.5.5"
 
 bluer = { version = "0.16", default-features = false, optional = true }
 rustls = { version = "0.21", optional = true }
